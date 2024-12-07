@@ -62,10 +62,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
 
 void wifi_init_sta(void)
 {
-    // Crear grupo de eventos
     wifi_event_group = xEventGroupCreate();
 
-    // Inicializar el stack Wi-Fi
     esp_netif_init();
     esp_event_loop_create_default();
     esp_netif_create_default_wifi_sta();
@@ -73,14 +71,12 @@ void wifi_init_sta(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
 
-    // Registrar los manejadores de eventos
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_t instance_got_ip;
 
     esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id);
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip);
 
-    // Configurar el Wi-Fi
     wifi_config_t wifi_config = {
         .sta = {
             .ssid = WIFI_SSID,
@@ -95,7 +91,6 @@ void wifi_init_sta(void)
 
     ESP_LOGI(TAG, "Configuración Wi-Fi completada. Intentando conectar...");
 
-    // Esperar hasta conectarse
     EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
                                            pdFALSE,
@@ -118,10 +113,6 @@ void wifi_init_sta(void)
 
 //*********parametros MQTT**************
 #define CONFIG_BROKER_URL "mqtt://broker.hivemq.com"
-
-//*********Parametros Wi-Fi**************
-
-//*********Timer**************
 
 void inicializarGPIO(void);
 
