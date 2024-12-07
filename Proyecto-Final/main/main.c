@@ -1,16 +1,28 @@
 #include <stdio.h>
+#include <stddef.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include <string.h>
 
+//*********logica de GPIO***********
 #define logica "Negativa"
 // #define logica "Positiva"
+
 uint8_t TRUE;
 uint8_t FALSE;
 
-#define sppButton GPIO_NUM_21
+#define sppButton GPIO_NUM_23
+
+uint8_t sppButtonPressed = 0;
+//*********logica de GPIO***********
+
+//*********Maquina de estado***********
+uint8_t estadoActual = 0;
+uint8_t estadoAnterior = 99; //valor para que se inicialice la comunicacion serial, luego se va a igualar a estado actual
+
+//*********Maquina de estado***********
 
 void inicializarGPIO(void);
 
@@ -21,16 +33,45 @@ void maquina_estado(void *pvParameters)
 
     while (1)
     {
-        if (gpio_get_level(sppButton) == 0)
+        if (sppButtonPressed == 0) // condicion para solo leer un pulso
         {
-            ESP_LOGI(TAG, "SPP Presionado");
+            if (gpio_get_level(sppButton) == TRUE)
+            {
+                sppButtonPressed = 1;
+                if (estadoActual < 4)
+                {
+                    estadoActual += 1;
+                }
+                else
+                    estadoActual = 0;
+            }
         }
-        
+
+        if (gpio_get_level(sppButton) == FALSE) // si no esta presionado reinicia la condicion
+        {
+            sppButtonPressed = 0;
+        }
+
         // Delay de 100 ms
         vTaskDelay(pdMS_TO_TICKS(100)); // Convierte milisegundos a ticks
     }
 }
 
+void info_serial(void *pvParameters)
+{
+#define TAG "Info Serial"
+
+    while (1)
+    {
+        if (estadoAnterior != estadoActual)
+        {
+            ESP_LOGI(TAG, "Estado = %d", estadoActual);
+            estadoAnterior = estadoActual;
+
+        }
+        vTaskDelay(pdMS_TO_TICKS(100)); // Convierte milisegundos a ticks
+    }
+}
 void app_main()
 {
     // funcion de inicializacion de GPIO
@@ -38,15 +79,22 @@ void app_main()
 
     // Crear la tarea Maquina de estado
     xTaskCreate(
-        maquina_estado,    // Función de la tarea
-        "MaquinaDeEstado", // Nombre de la tarea
-        2048,              // Tamaño de la pila en palabras
-        NULL,              // Parámetro de la tarea
-        5,                 // Prioridad de la tarea
-        NULL               // Handle de la tarea (opcional)
-    );
+        maquina_estado,
+        "MaquinaDeEstado",
+        2048,
+        NULL,
+        5,
+        NULL);
 
-    ESP_LOGI(TAG, "Tarea creada. El sistema está funcionando.");
+    xTaskCreate(
+        info_serial,
+        "Serial",
+        2048,
+        NULL,
+        5,
+        NULL);
+
+    ESP_LOGD(TAG, "Tarea creada. El sistema está funcionando.");
 }
 
 void inicializarGPIO()
