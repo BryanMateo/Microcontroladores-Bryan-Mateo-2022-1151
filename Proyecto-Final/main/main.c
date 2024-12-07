@@ -1,10 +1,18 @@
 #include <stdio.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include <string.h>
+#include "mqtt_client.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "nvs_flash.h"
+#include "esp_netif.h"
 
 //*********logica de GPIO***********
 #define logica "Negativa"
@@ -17,30 +25,176 @@ uint8_t FALSE;
 #define led0 GPIO_NUM_2
 
 uint8_t sppButtonPressed = 0;
+uint8_t sppButtonMQTT = 0;
 //*********logica de GPIO***********
 
 //*********Maquina de estado***********
 uint8_t estadoActual = 0;
 uint8_t estadoAnterior = 99; // valor para que se inicialice la comunicacion serial, luego se va a igualar a estado actual
 
-//*********Maquina de estado***********
+//*********Wifi***********
+static const char *TAG = "Proyecto Final";
+#define WIFI_SSID "Nexxt"         
+#define WIFI_PASSWORD "ab123456cd" 
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT BIT1
+static EventGroupHandle_t wifi_event_group;
 
-//*********Timer**************
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
+    {
+        esp_wifi_connect();
+    }
+    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
+    {
+        ESP_LOGI(TAG, "Conexión fallida, intentando reconectar...");
+        esp_wifi_connect();
+        xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "Conectado con IP:" IPSTR, IP2STR(&event->ip_info.ip));
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+void wifi_init_sta(void)
+{
+    // Crear grupo de eventos
+    wifi_event_group = xEventGroupCreate();
+
+    // Inicializar el stack Wi-Fi
+    esp_netif_init();
+    esp_event_loop_create_default();
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+
+    // Registrar los manejadores de eventos
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+
+    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id);
+    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip);
+
+    // Configurar el Wi-Fi
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASSWORD,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    esp_wifi_start();
+
+    ESP_LOGI(TAG, "Configuración Wi-Fi completada. Intentando conectar...");
+
+    // Esperar hasta conectarse
+    EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
+                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE,
+                                           pdFALSE,
+                                           portMAX_DELAY);
+
+    if (bits & WIFI_CONNECTED_BIT)
+    {
+        ESP_LOGI(TAG, "Conexión Wi-Fi exitosa.");
+    }
+    else if (bits & WIFI_FAIL_BIT)
+    {
+        ESP_LOGI(TAG, "Conexión Wi-Fi fallida.");
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Error inesperado en el evento Wi-Fi.");
+    }
+}
+
+//*********parametros MQTT**************
+#define CONFIG_BROKER_URL "mqtt://broker.hivemq.com"
+
+//*********Parametros Wi-Fi**************
 
 //*********Timer**************
 
 void inicializarGPIO(void);
 
-// Función que ejecutará la tarea periódica
-void maquina_estado(void *pvParameters)
+// MQTT*********************
+
+static void mqtt5_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+    esp_mqtt_event_handle_t event = event_data;
+    esp_mqtt_client_handle_t client = event->client;
+    int msg_id;
+
+    switch ((esp_mqtt_event_id_t)event_id)
+    {
+
+    case MQTT_EVENT_CONNECTED:
+        msg_id = esp_mqtt_client_subscribe(client, "/2022-1151/SPP", 1);
+        break;
+
+    case MQTT_EVENT_DATA:
+
+        if (strncmp(event->topic, "/2022-1151/SPP", event->topic_len) == 0)
+        {
+            char received_data[2]; // Solo esperamos "0" o "1"
+            snprintf(received_data, sizeof(received_data), "%.*s", event->data_len, event->data);
+            if (strcmp(received_data, "1") == 0)
+            {
+                sppButtonMQTT = 1;
+            }
+        }
+        break;
+
+    case MQTT_EVENT_ERROR:
+        // ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
+        break;
+
+    default:
+        // ESP_LOGI(TAG, "Other event id:%d", event->event_id);
+        break;
+    }
+}
+
+static void mqtt5_app_start(void)
+{
+    esp_mqtt_client_config_t mqtt5_cfg = {
+        .broker.address.uri = CONFIG_BROKER_URL,
+        .session.protocol_ver = MQTT_PROTOCOL_V_5,
+        .network.disable_auto_reconnect = false,
+    };
+
+    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt5_cfg);
+    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt5_event_handler, NULL);
+    esp_mqtt_client_start(client);
+}
+
+void maquina_estado(void *pvParameters) // task maquina estado
 {
     while (1)
     {
         if (sppButtonPressed == 0) // condicion para solo leer un pulso
         {
-            if (gpio_get_level(sppButton) == TRUE)
+            if (gpio_get_level(sppButton) == TRUE) // boton fisico
             {
                 sppButtonPressed = 1;
+                if (estadoActual < 4)
+                {
+                    estadoActual += 1;
+                }
+                else
+                    estadoActual = 0;
+            }
+            else if (sppButtonMQTT == 1) // boton MQTT
+            {
+                sppButtonMQTT = 0; // aseguramos estado
                 if (estadoActual < 4)
                 {
                     estadoActual += 1;
@@ -59,28 +213,25 @@ void maquina_estado(void *pvParameters)
     }
 }
 
-void info_serial(void *pvParameters)
+void info_serial(void *pvParameters) // task informacion serial
 {
-#define TAG "Info Serial"
-
     while (1)
     {
         if (estadoAnterior != estadoActual)
         {
-            ESP_LOGI(TAG, "Estado = %d", estadoActual);
+            ESP_LOGI("Info Serial", "Estado = %d", estadoActual);
             estadoAnterior = estadoActual;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
-void led_blink(void *pvParameters)
+void led_blink(void *pvParameters) // task parpadeo led
 {
 
     uint16_t contadorActual = 0;
     uint8_t ledLevel = 0;
     uint8_t estadoLedAnterior = 0; // variable para reiniciar los contadores de tiempo
-    uint8_t periodoBarrido = 0;
     uint16_t contadorBarrido = 0;
     uint16_t tiempoBarrido = 0;
 
@@ -168,8 +319,23 @@ void led_blink(void *pvParameters)
 
 void app_main()
 {
-    // funcion de inicializacion de GPIO
+    // Inicializar GPIO
     inicializarGPIO();
+
+    // Inicializar NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    ESP_LOGI(TAG, "Inicializando Wi-Fi...");
+    wifi_init_sta();
+
+    // Iniciar MQTT
+    mqtt5_app_start();
 
     // Crear la tarea Maquina de estado
     xTaskCreate(
@@ -195,27 +361,24 @@ void app_main()
         NULL,
         5,
         NULL);
-
-    ESP_LOGD(TAG, "Tarea creada. El sistema está funcionando.");
 }
 
 void inicializarGPIO()
 {
-#define TAG "GPIO"
     if (strcmp(logica, "Negativa") == 0)
     {
         TRUE = 0;
         FALSE = 1;
-        ESP_LOGI(TAG, "Logica Negativa");
+        ESP_LOGI("GPIO", "Logica Negativa");
     }
     else if (strcmp(logica, "Positiva") == 0)
     {
         TRUE = 1;
         FALSE = 0;
-        ESP_LOGI(TAG, "Logica Positiva");
+        ESP_LOGI("GPIO", "Logica Positiva");
     }
     else
-        ESP_LOGE(TAG, "Error Logica Incorrecta");
+        ESP_LOGE("GPIO", "Error Logica Incorrecta");
 
     // Boton SPP Logica Negativa
     gpio_reset_pin(sppButton);
@@ -226,5 +389,5 @@ void inicializarGPIO()
     gpio_reset_pin(led0);
     gpio_set_direction(led0, GPIO_MODE_OUTPUT);
 
-    ESP_LOGI(TAG, "GPIO Inicializado");
+    ESP_LOGI("GPIO", "GPIO Inicializado");
 }
